@@ -1,0 +1,423 @@
+from azure.common.credentials import UserPassCredentials
+import json
+import requests
+import time
+from datetime import datetime
+from datetime import timedelta
+import uuid
+import pwinput
+ 
+def other_settings(username, password, aadtenant, subscriptions):
+ 
+    print("\nCreating other settings meanwhile please onboard on CMO Portal.")
+    graphcredentials = UserPassCredentials(
+            username,
+            password,
+            tenant=aadtenant,
+            resource="https://management.azure.com",
+        )
+    MANAGEMENTAPIHEADER = {
+        "Authorization": "Bearer "
+        + graphcredentials.token["access_token"],
+        "host": "management.azure.com",
+        "Content-Type": "application/json",
+    }
+ 
+    sbody = {
+        "properties": {
+            "notificationsByRole": {
+                "state": "Off",
+                "roles": []
+            },
+            "emails": "is.to.vendormonitor@accenture.com",
+            "alertNotifications": {
+                "state": "On",
+                "minimalSeverity": "High"
+            }
+        }
+    }
+ 
+    for each in subscriptions.get('value'):
+        print(f"For {each.get('subscriptionId')}:")
+        print(f"- Updating Security Contacts.")
+        url = f"https://management.azure.com/subscriptions/{each.get('subscriptionId')}/providers/Microsoft.Security/securityContacts/default?api-version=2020-01-01-preview"
+        response = requests.put(url, headers=MANAGEMENTAPIHEADER, data=json.dumps(sbody)).json()
+        if "error" in response.keys():
+            print(f"- Failed to add as {response.get('error').get('message')}")
+ 
+        for resourceProviderNamespace in ["microsoft.insights", "Microsoft.Security"]:
+            print(f"- Registering Resource Provider ({resourceProviderNamespace})")
+            url = f"https://management.azure.com/subscriptions/{each.get('subscriptionId')}/providers/{resourceProviderNamespace}/register?api-version=2021-04-01"
+            response = requests.post(url, headers=MANAGEMENTAPIHEADER).json()
+            if "error" in response.keys():
+                print(f"- Failed to add as {response.get('error').get('message')}")
+       
+ 
+def add_requestor(requestor, username, password, aadtenant):
+    print(f"\nInviting {requestor} to the Azure AD.")
+    graphcredentials = UserPassCredentials(
+                username,
+                password,
+                tenant=aadtenant,
+                resource="https://graph.microsoft.com",
+            )
+    MANAGEMENTAPIHEADER = {
+            "Authorization": "Bearer "
+            + graphcredentials.token["access_token"],
+            "host": "graph.microsoft.com",
+            "Content-Type": "application/json",
+        }
+    url = "https://graph.microsoft.com/v1.0/invitations"
+    body = {
+        "invitedUserEmailAddress": requestor,
+        "inviteRedirectUrl": f"https://portal.azure.com/{aadtenant}"
+    }
+ 
+    response = requests.post(url, headers=MANAGEMENTAPIHEADER, data=json.dumps(body))
+    time.sleep(5)
+    response = response.json()
+   
+    if "error" in response.keys():
+            print(f"- Failed to add as {response.get('error').get('message')}")
+    else:
+        url = "https://graph.microsoft.com/v1.0/directoryRoles/roleTemplateId=62e90394-69f5-4237-9190-012177145e10/members/$ref"
+        body = {
+            "@odata.id": f"https://graph.microsoft.com/v1.0/directoryObjects/{response.get('invitedUser').get('id')}"
+        }
+        print(f"Assigning {requestor} as Global Administrator.")
+        resp = requests.post(url, headers=MANAGEMENTAPIHEADER, data=json.dumps(body))
+        time.sleep(5)
+ 
+    return response.get('invitedUser').get('id')
+ 
+ 
+def create_sp(tool, username, password, aadtenant, principalname, subscriptions, user_principle_id):
+ 
+    print("\nCreating Service Principal for", tool)
+    #Get Credentials
+    graphcredentials = UserPassCredentials(
+                username,
+                password,
+                tenant=aadtenant,
+                resource="https://graph.microsoft.com",
+            )
+    MANAGEMENTAPIHEADER = {
+            "Authorization": "Bearer "
+            + graphcredentials.token["access_token"],
+            "host": "graph.microsoft.com",
+            "Content-Type": "application/json",
+        }
+    applicationURL = "https://graph.microsoft.com/v1.0/applications"
+    body = {"displayName": principalname, "signInAudience": "AzureADMyOrg"}
+    if tool == 'cloudhealth':
+            rplybody = {"redirectUris": ["https://apps.cloudhealthtech.com"]}
+            body.update(web=rplybody)
+    elif tool == 'prismacloud':
+            rplybody = {"redirectUris": ["https://app2.prismacloud.io"]}
+            body.update(web=rplybody)
+    else:
+        pass
+        #Change Org ID user type
+        #orgidURL = "https://graph.microsoft.com/v1.0/me"        
+        #ubody = {
+        #    "aboutMe": "To be used by CMO Support",
+        #    "userType": "Guest"
+        #}
+        #requests.patch(orgidURL, headers=MANAGEMENTAPIHEADER, data=json.dumps(ubody))
+ 
+ 
+    application = requests.post(applicationURL, headers=MANAGEMENTAPIHEADER, data=json.dumps(body)).json()
+    if "error" in application.keys():
+            print(f"- Failed to add as {application.get('error').get('message')}")
+            exit()
+ 
+    ownerURL = f"https://graph.microsoft.com/v1.0/applications/{application['id']}/owners/$ref"
+    onwerbody = {
+        "@odata.id": f"https://graph.microsoft.com/v1.0/directoryObjects/{user_principle_id}"
+    }
+    print(f"- Assigning {requestor} as owner to {tool} application")
+    requests.post(ownerURL, headers=MANAGEMENTAPIHEADER, data=json.dumps(onwerbody))
+   
+ 
+    servicePrincipalURL = "https://graph.microsoft.com/v1.0/serviceprincipals"
+    spnbody = {
+        "displayName": principalname,
+        "servicePrincipalType": "Application",
+        "servicePrincipalNames": [application["appId"]],
+        "appId": application["appId"],
+    }
+    servicePrincipal = requests.post(
+        servicePrincipalURL,
+        headers=MANAGEMENTAPIHEADER,
+        data=json.dumps(spnbody),
+    ).json()
+    if "error" in servicePrincipal.keys():
+            print(f"- Failed to add as {servicePrincipal.get('error').get('message')}")
+ 
+    print(f'- Application (client) ID: {application["appId"]}')
+    if tool == 'prismacloud':
+            print(f'- Enterprise Object ID   : {servicePrincipal["id"]}')
+ 
+    #print(subscriptions)
+    for each in subscriptions.get('value'):  
+ 
+        passwordURL = (
+                "https://graph.microsoft.com/v1.0/applications/"
+                + application["id"]
+                + "/addPassword"
+            )
+        secretenddate = datetime.now() + timedelta(days=365)
+        passwordbody = {
+            "passwordCredential": {
+                "displayName": tool + '_key (' + each.get('subscriptionId')[:8] + ')',
+                "endDateTime": secretenddate.strftime("%Y-%m-%dT00:00:00Z"),
+            }
+        }
+        passwordCredential = requests.post(
+                passwordURL,
+                headers=MANAGEMENTAPIHEADER,
+                data=json.dumps(passwordbody),
+            ).json()
+        print(f'- Secret Name            : {passwordCredential["displayName"]}')
+        print(f'- Secret Value           : {passwordCredential["secretText"]}')
+       
+ 
+    return servicePrincipal["id"]
+ 
+def sub_assignment(principle_id, username, password, aadtenant, roleDefinitionId, subscriptions):
+    graphcredentials = UserPassCredentials(
+            username,
+            password,
+            tenant=aadtenant,
+            resource="https://management.azure.com",
+        )
+    MANAGEMENTAPIHEADER = {
+        "Authorization": "Bearer "
+                            + graphcredentials.token["access_token"],
+        "host": "management.azure.com",
+        "Content-Type": "application/json",
+    }
+    for each in subscriptions.get('value'):
+        if each.get("state") == "Enabled":
+            roleAssignmentId = str(uuid.uuid4())
+            roleassignmentURL = f"https://management.azure.com{each.get('id')}/providers/Microsoft.Authorization/roleAssignments/{roleAssignmentId}?api-version=2015-07-01"
+            body = {
+                "properties": {
+                    "roleDefinitionId": f"{each.get('id')}/providers/Microsoft.Authorization/roleDefinitions/{roleDefinitionId}",
+                    "principalId": principle_id
+                }
+            }
+            print(f" - Assigning to {each.get('subscriptionId')}")
+            roleassignment = requests.put(roleassignmentURL, headers=MANAGEMENTAPIHEADER,data=json.dumps(body)).json()
+            if "error" in roleassignment.keys():
+                print(f" - Failed to assign due to {roleassignment.get('error').get('message')}")
+ 
+def create_role(username, password, aadtenant):
+   
+    subscription_list = []
+    #Get subscriptions
+    graphcredentials = UserPassCredentials(
+            username,
+            password,
+            tenant=aadtenant,
+            resource="https://management.azure.com",
+        )
+    MANAGEMENTAPIHEADER = {
+        "Authorization": "Bearer "
+                            + graphcredentials.token["access_token"],
+        "host": "management.azure.com",
+        "Content-Type": "application/json",
+    }
+    subscriptionURL = "https://management.azure.com/subscriptions?api-version=2020-01-01"
+    subscriptions = requests.get(subscriptionURL, headers=MANAGEMENTAPIHEADER).json()
+    if "error" in subscriptions.keys():
+                print(f"- Failed to get subscriptions due to {subscriptions.get('error').get('message')}")
+                exit()
+ 
+    for each in subscriptions.get("value"):
+        if each.get("state") == "Enabled":
+            subscription_list.append(each.get("id"))
+           
+ 
+    #Create Role
+    roleDefinitionId = str(uuid.uuid4())
+    customroleURL = f"https://management.azure.com{subscription_list[0]}/providers/Microsoft.Authorization/roleDefinitions/{roleDefinitionId}?api-version=2015-07-01"
+   
+    body = {
+        "name": f"{roleDefinitionId}",
+        "properties": {
+            "roleName": "ACP-Prisma-Readonly-1.0",
+            "description": "Grants Access to Prisma Cloud",
+            "type": "CustomRole",
+            "permissions": [
+                {
+                    "actions": [
+                        "Microsoft.Security/autoProvisioningSettings/read",
+                        "Microsoft.Security/pricings/read",
+                        "Microsoft.Security/securityContacts/read",
+                        "Microsoft.Storage/storageAccounts/read",
+                        "Microsoft.Storage/storageAccounts/tableServices/read",
+                        "Microsoft.Storage/storageAccounts/queueServices/read",
+                        "Microsoft.KeyVault/vaults/read",
+                        "Microsoft.Network/locations/usages/read",
+                        "Microsoft.Network/connections/read",
+                        "Microsoft.Network/applicationGateways/read",
+                        "Microsoft.Network/loadBalancers/read",
+                        "Microsoft.Network/networkInterfaces/read",
+                        "Microsoft.Network/networkInterfaces/effectiveNetworkSecurityGroups/action",
+                        "Microsoft.Network/networkSecurityGroups/read",
+                        "Microsoft.Network/networkSecurityGroups/securityRules/read",
+                        "Microsoft.Network/networkSecurityGroups/defaultSecurityRules/read",
+                        "Microsoft.Network/applicationSecurityGroups/read",
+                        "Microsoft.Network/networkWatchers/read",
+                        "Microsoft.Network/networkWatchers/securityGroupView/action",
+                        "Microsoft.Network/networkWatchers/queryFlowLogStatus/action",
+                        "Microsoft.Network/virtualNetworks/read",
+                        "Microsoft.Network/virtualNetworks/subnets/read",
+                        "Microsoft.Network/virtualNetworks/virtualNetworkPeerings/read",
+                        "Microsoft.Network/virtualNetworkGateways/read",
+                        "Microsoft.Network/publicIPAddresses/read",
+                        "Microsoft.Network/routeTables/read",
+                        "Microsoft.Network/routeTables/routes/read",
+                        "Microsoft.Network/azurefirewalls/read",
+                        "Microsoft.Network/publicIPAddresses/read",
+                        "Microsoft.Network/ddosProtectionPlans/read",
+                        "Microsoft.Resources/subscriptions/resourceGroups/read",
+                        "Microsoft.Authorization/locks/read",
+                        "Microsoft.Authorization/policyAssignments/read",
+                        "Microsoft.Authorization/classicAdministrators/read",
+                        "Microsoft.Authorization/permissions/read",
+                        "Microsoft.Authorization/policyDefinitions/read",
+                        "Microsoft.Authorization/roleDefinitions/read",
+                        "Microsoft.Authorization/roleAssignments/read",
+                        "Microsoft.ContainerInstance/containerGroups/read",
+                        "Microsoft.ContainerRegistry/registries/read",
+                        "Microsoft.ContainerRegistry/registries/metadata/read",
+                        "Microsoft.ContainerRegistry/registries/webhooks/getCallbackConfig/action",
+                        "Microsoft.ContainerService/managedClusters/read",
+                        "Microsoft.Compute/disks/read",
+                        "Microsoft.Compute/availabilitySets/read",
+                        "Microsoft.Compute/virtualMachines/read",
+                        "Microsoft.Compute/virtualMachines/instanceView/read",
+                        "Microsoft.Compute/virtualMachines/extensions/read",
+                        "Microsoft.Compute/virtualMachineScaleSets/read",
+                        "Microsoft.Compute/virtualMachineScaleSets/virtualMachines/read",
+                        "Microsoft.Compute/virtualMachineScaleSets/virtualmachines/instanceView/read",
+                        "Microsoft.Sql/managedInstances/read",
+                        "Microsoft.Sql/servers/read",
+                        "Microsoft.Sql/servers/securityAlertPolicies/read",
+                        "Microsoft.Sql/servers/auditingSettings/read",
+                        "Microsoft.Sql/servers/databases/read",
+                        "Microsoft.Sql/servers/databases/securityAlertPolicies/read",
+                        "Microsoft.Sql/servers/databases/transparentDataEncryption/read",
+                        "Microsoft.Sql/servers/databases/securityAlertPolicies/read",
+                        "Microsoft.Sql/servers/databases/auditingSettings/read",
+                        "Microsoft.DBforMySQL/servers/read",
+                        "Microsoft.DBforMySQL/servers/firewallRules/read",
+                        "Microsoft.DBforMySQL/servers/virtualNetworkRules/read",
+                        "Microsoft.DBforPostgreSQL/servers/read",
+                        "Microsoft.DBforPostgreSQL/servers/firewallRules/read",
+                        "Microsoft.DBforPostgreSQL/serversv2/firewallRules/read",
+                        "Microsoft.DocumentDB/databaseAccounts/read",
+                        "Microsoft.Insights/ActivityLogAlerts/Read",
+                        "Microsoft.Insights/LogProfiles/Read",
+                        "Microsoft.Insights/actionGroups/read",
+                        "Microsoft.Insights/eventtypes/values/Read",
+                        "microsoft.insights/diagnosticSettings/read",
+                        "Microsoft.Web/sites/Read",
+                        "Microsoft.Web/sites/config/Read",
+                        "Microsoft.Web/sites/functions/read",
+                        "Microsoft.Web/sites/config/list/action",
+                        "Microsoft.Web/sites/publishxml/action",
+                        "Microsoft.DataFactory/datafactories/read",
+                        "Microsoft.DataFactory/factories/read",
+                        "Microsoft.Databricks/workspaces/read",
+                        "Microsoft.ApiManagement/service/read",
+                        "Microsoft.ApiManagement/service/portalsettings/read",
+                        "Microsoft.ApiManagement/service/tenant/read",
+                        "Microsoft.Cache/redis/read",
+                        "Microsoft.Cache/redis/firewallRules/read",
+                        "Microsoft.EventHub/namespaces/read",
+                        "Microsoft.EventHub/namespaces/authorizationRules/read",
+                        "Microsoft.EventHub/namespaces/virtualnetworkrules/read",
+                        "Microsoft.EventHub/namespaces/ipfilterrules/read",
+                        "Microsoft.EventHub/namespaces/eventhubs/read",
+                        "Microsoft.EventHub/namespaces/eventhubs/authorizationRules/read",
+                        "Microsoft.Logic/workflows/read",
+                        "Microsoft.Web/customApis/read",
+                        "Microsoft.DataLakeAnalytics/accounts/read",
+                        "Microsoft.DataLakeAnalytics/accounts/dataLakeStoreAccounts/read",
+                        "Microsoft.DataLakeAnalytics/accounts/firewallRules/read",
+                        "Microsoft.DataLakeAnalytics/accounts/storageAccounts/read",
+                        "Microsoft.DataLakeStore/accounts/read",
+                        "Microsoft.DataLakeStore/accounts/firewallRules/read",
+                        "Microsoft.DataLakeStore/accounts/trustedIdProviders/read",
+                        "Microsoft.DataLakeStore/accounts/virtualNetworkRules/read"
+                    ],
+                    "notActions": []
+                }
+            ],
+            "assignableScopes": subscription_list
+        }
+    }
+    print("\nCreating Prisma Custom Role.")
+    role = requests.put(customroleURL, headers=MANAGEMENTAPIHEADER, data=json.dumps(body)).json()
+    if "error" in role.keys():
+                print(f"- Failed to create due to {role.get('error').get('message')}")
+                exit()
+    else:
+        return role.get("name"), subscriptions
+ 
+username = input("Enter the Org ID's: \nEmail: ")
+password = pwinput.pwinput()
+cmo_tenant = input("Enter the CMO Tenant: ")
+aadtenant = input("Enter the Azure Active Directory Tenant ID: ")
+requestor = input("Enter the Requestor email: ")
+ 
+user_principle_id = add_requestor(requestor, username, password, aadtenant)
+tool = 'prismacloud'
+principalname = f'Prisma-{cmo_tenant}-Subscription-App'
+roleDefinitionId, subscriptions = create_role(username, password, aadtenant)
+#print(subscriptions)
+principle_id = create_sp(tool, username, password, aadtenant, principalname, subscriptions, user_principle_id)
+time.sleep(30)
+print("- Assigning Custom Prisma Role")
+sub_assignment(principle_id, username, password, aadtenant, roleDefinitionId, subscriptions)
+time.sleep(5)
+print("- Assigning Reader Role")
+roleDefinitionId = 'acdd72a7-3385-48ef-bd42-f606fba81ae7'
+sub_assignment(principle_id, username, password, aadtenant, roleDefinitionId, subscriptions)
+ 
+tool = 'cloudhealth'
+principalname = f'Cloudhealth-{cmo_tenant}-Subscription-App'
+principle_id = create_sp(tool, username, password, aadtenant, principalname, subscriptions, user_principle_id)
+time.sleep(5)
+print("- Assigning Reader Role")
+roleDefinitionId = 'acdd72a7-3385-48ef-bd42-f606fba81ae7'
+sub_assignment(principle_id, username, password, aadtenant, roleDefinitionId, subscriptions)
+time.sleep(5)
+ 
+ 
+tool = 'ACPX'
+principalname = 'acpapi (do not delete)'
+principle_id = create_sp(tool, username, password, aadtenant, principalname, subscriptions, user_principle_id)
+time.sleep(5)
+print("- Assigning Reader Role")
+roleDefinitionId = 'acdd72a7-3385-48ef-bd42-f606fba81ae7'
+sub_assignment(principle_id, username, password, aadtenant, roleDefinitionId, subscriptions)
+time.sleep(5)
+print("- Assigning Reader and Data Access Role")
+roleDefinitionId = 'c12c1c16-33a1-487b-954d-41c89c60f349'
+sub_assignment(principle_id, username, password, aadtenant, roleDefinitionId, subscriptions)
+time.sleep(5)
+print("- Assigning Website Contributor Role")
+roleDefinitionId = 'de139f84-1756-47ae-9be6-808fbbe84772'
+sub_assignment(principle_id, username, password, aadtenant, roleDefinitionId, subscriptions)
+time.sleep(5)
+ 
+print(f"\nAssigning Owner Role to {requestor}")
+roleDefinitionId = '8e3af657-a8ff-443c-a75c-2fe8c4bcb635'
+sub_assignment(user_principle_id, username, password, aadtenant, roleDefinitionId, subscriptions)
+ 
+other_settings(username, password, aadtenant, subscriptions)
+print("\nCompleted.")

@@ -2,8 +2,11 @@ Remove-Variable $tenantId $subscriptionName -ErrorAction SilentlyContinue
 
 #Hardcode Tenant ID and Subscription Name (Optional) to bypass console entry
 #Subscription Name may be required for some Tenant IDs and should be included if you run into an sign-in error
-$tenantId = "ddbccd57-634a-4bea-bd43-e76ae4dff37d"
-$subscriptionName  = "ACP3 ST AUS"
+
+Write-Host " As of now use this Testing Tenant details Tenant:- ddbccd57-634a-4bea-bd43-e76ae4dff37d  Subscription name:- ACP3 ST AUS"
+
+$tenantId = Read-Host "Enter your Tenant ID"
+$subscriptionName  = Read-Host "Enter your Subscription name:"
 
 #Check for Azure Accounts Powershell Module used to connect to Azure
 $result = Get-Module -Name Az.Accounts -ListAvailable
